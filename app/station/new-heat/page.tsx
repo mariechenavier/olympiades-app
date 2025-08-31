@@ -2,14 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
-// --- Listes à personnaliser ---
+/** ---------------- Config activités (comme tes règles) ---------------- */
 const TEAMS = [
   "2nd A", "2nd B", "2nd C", "2nd D", "2nd E", "2nd F", "2nd G", "2nd H",
   "2nd MEMN", "2nd MTNE A", "2nd MTNE B"
 ];
 
-// Catégories selon tes règles
 const ACTIVITIES_DUEL = [
   "Accronomètre",
   "Jenga géant",
@@ -35,7 +35,6 @@ const ACTIVITIES_RACE = [
 
 const ACTIVITIES_FREE = ["Archery Tag", "Tyro Basket"];
 
-// Liste globale d’activités
 const ACTIVITIES = [
   ...ACTIVITIES_DUEL,
   ...ACTIVITIES_TRIPLE,
@@ -51,7 +50,7 @@ function getActivityType(name: string): ActivityType {
   return "free";
 }
 
-// Activités SANS record (UI et +20 désactivés)
+// Activités SANS record (+20 désactivé et pas d'affichage du champ)
 const NO_RECORD_ACTIVITIES = new Set<string>([
   "Foulard musical",
   "Jenga géant",
@@ -62,7 +61,6 @@ const NO_RECORD_ACTIVITIES = new Set<string>([
   "Question pour un champion",
 ]);
 
-// Libellés par défaut des records (affichage)
 type RecordInfo = { label: string; value?: string };
 const DEFAULT_RECORDS: Record<string, RecordInfo> = {
   "Accronomètre": { label: "Meilleur chrono (mm:ss ou s)" },
@@ -85,20 +83,20 @@ const DEFAULT_RECORDS: Record<string, RecordInfo> = {
   "Tyro Basket": { label: "Points d'équipe max" },
 };
 
-// --- Type du journal ---
-type Entry = {
+/** ---------------- Types ---------------- */
+type EntryLocal = {
   id: string;
   activity: string;
   team: string;
-  scorePoints: number;         // points d’épreuve (ou score libre pour "free")
-  rawScore?: number;           // valeur libre saisie (archery/tyro) pour affichage
-  participationPoints: number; // 10 / 5 / 2 / 0
-  recordBonus: number;         // +20 si record battu, sinon 0
-  recordValue?: string;        // nouvelle valeur du record si battu
+  scorePoints: number;         // points d’épreuve (ou valeur libre utilisée comme points pour "free")
+  rawScore?: number;           // valeur libre affichée (free)
+  participationPoints: number; // 10/5/2/0
+  recordBonus: number;         // 20 ou 0
+  recordValue?: string;        // valeur saisie si record battu
   createdAt: string;
 };
 
-// Bonus de participation
+/** ---------------- Utilitaires ---------------- */
 function participationBonusForNthPass(nthPassZeroBased: number): number {
   if (nthPassZeroBased === 0) return 10;
   if (nthPassZeroBased === 1) return 5;
@@ -106,13 +104,13 @@ function participationBonusForNthPass(nthPassZeroBased: number): number {
   return 0;
 }
 
+/** ===================== PAGE ===================== */
 export default function NewHeatPage() {
   const router = useRouter();
 
-  // Contrôle de rôle pour cacher/montrer le classement
   const [role, setRole] = useState<string | null>(null);
 
-  // États du formulaire
+  // Form state
   const [activity, setActivity] = useState<string>(ACTIVITIES[0] ?? "");
   const [team, setTeam] = useState<string>("");
 
@@ -127,10 +125,10 @@ export default function NewHeatPage() {
   const [recordBeaten, setRecordBeaten] = useState<boolean>(false);
   const [newRecordValue, setNewRecordValue] = useState<string>("");
 
-  // Journal
-  const [entries, setEntries] = useState<Entry[]>([]);
+  // Journal local (feedback visuel)
+  const [entries, setEntries] = useState<EntryLocal[]>([]);
 
-  // Charger rôle + records + journal
+  /** 1) Auth locale : exiger un rôle (admin/animateur), sinon login */
   useEffect(() => {
     const r = localStorage.getItem("current-role");
     if (!r) {
@@ -138,31 +136,26 @@ export default function NewHeatPage() {
       return;
     }
     setRole(r);
-
-    try {
-      const rawR = localStorage.getItem("activity-records");
-      if (rawR) setRecords(JSON.parse(rawR));
-      else setRecords(DEFAULT_RECORDS);
-    } catch {
-      setRecords(DEFAULT_RECORDS);
-    }
-
-    try {
-      const rawE = localStorage.getItem("journal-saisies");
-      if (rawE) setEntries(JSON.parse(rawE));
-    } catch {}
   }, [router]);
 
-  // Sauvegardes
+  /** 2) Charger les records depuis Supabase au montage */
   useEffect(() => {
-    try { localStorage.setItem("activity-records", JSON.stringify(records)); } catch {}
-  }, [records]);
+    async function loadRecords() {
+      const { data, error } = await supabase.from("records").select("*");
+      if (!error && data) {
+        const map: Record<string, RecordInfo> = { ...DEFAULT_RECORDS };
+        for (const r of data as any[]) {
+          map[r.activity] = { label: r.label, value: r.value ?? undefined };
+        }
+        setRecords(map);
+      } else {
+        setRecords({ ...DEFAULT_RECORDS });
+      }
+    }
+    loadRecords();
+  }, []);
 
-  useEffect(() => {
-    try { localStorage.setItem("journal-saisies", JSON.stringify(entries)); } catch {}
-  }, [entries]);
-
-  // Reset contrôles si activité change
+  /** 3) Reset des contrôles quand l’activité change */
   useEffect(() => {
     setDuelOutcome("");
     setTripleOutcome("");
@@ -172,18 +165,18 @@ export default function NewHeatPage() {
     setNewRecordValue("");
   }, [activity]);
 
-  // Saisie stricte pour "free"
+  /** 4) Saisie stricte numérique pour "free" */
   function handleFreeScoreChange(e: React.ChangeEvent<HTMLInputElement>) {
     const val = e.target.value.replace(/\D/g, "");
     setFreeScore(val);
   }
 
-  // Supprimer une ligne du journal
+  /** 5) Suppression d’une ligne du journal (local uniquement) */
   function deleteEntry(id: string) {
     setEntries((prev) => prev.filter((e) => e.id !== id));
   }
 
-  // Calcule les points d’épreuve
+  /** 6) Calcul des points d’épreuve selon le type */
   function computeScorePoints(type: ActivityType): number | null {
     if (type === "duel") {
       if (duelOutcome === "win") return 10;
@@ -203,16 +196,17 @@ export default function NewHeatPage() {
       if (racePlacement === 4) return 3;
       return null;
     }
-    // free = valeur libre (entier)
+    // free: la valeur entrée devient les points d’épreuve
     if (freeScore === "" || isNaN(Number(freeScore))) return null;
     return Number(freeScore);
   }
 
-  // Soumission
-  function onSubmit(e: React.FormEvent) {
+  /** 7) Soumission : envoie dans Supabase + journal local */
+  async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+
     if (!activity) { alert("Choisis une activité."); return; }
-    if (!team) { alert("Choisis une équipe."); return; }
+    if (!team)     { alert("Choisis une équipe."); return; }
 
     const type = getActivityType(activity);
     const scorePoints = computeScorePoints(type);
@@ -221,13 +215,13 @@ export default function NewHeatPage() {
       return;
     }
 
-    // Participation : compte combien de passages déjà faits par cette équipe sur cette activité
+    // participation : calcule le nombre de passages déjà faits par cette équipe sur cette activité (journal local = feedback, pas critique)
     const previousPasses = entries.filter(
       (en) => en.activity === activity && en.team === team
     ).length;
     const participationPoints = participationBonusForNthPass(previousPasses);
 
-    // Records : désactivés pour certaines activités
+    // record : si activé et coché, upsert dans Supabase
     const recordsDisabled = NO_RECORD_ACTIVITIES.has(activity);
     let recordBonus = 0;
     let recordValue: string | undefined = undefined;
@@ -239,28 +233,60 @@ export default function NewHeatPage() {
       }
       recordBonus = 20;
       recordValue = newRecordValue.trim();
-      // Mettre à jour le record affiché
-      setRecords((prev) => {
-        const current = prev[activity] ?? { label: DEFAULT_RECORDS[activity]?.label ?? "Record" };
-        return { ...prev, [activity]: { ...current, value: recordValue } };
-      });
+
+      const label =
+        records[activity]?.label ||
+        DEFAULT_RECORDS[activity]?.label ||
+        "Record";
+
+      const { error: recErr } = await supabase
+        .from("records")
+        .upsert({ activity, label, value: recordValue }, { onConflict: "activity" });
+
+      if (recErr) {
+        alert("Erreur mise à jour du record : " + recErr.message);
+        return;
+      }
+
+      // mettre à jour l’état local d’affichage
+      setRecords((prev) => ({
+        ...prev,
+        [activity]: { label, value: recordValue },
+      }));
     }
 
-    const entry: Entry = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    // insertion de la saisie dans Supabase
+    const { error: insErr } = await supabase.from("entries").insert({
       activity,
       team,
-      scorePoints,
-      rawScore: type === "free" ? Number(freeScore) : undefined,
-      participationPoints,
-      recordBonus,
-      recordValue,
-      createdAt: new Date().toLocaleString(),
-    };
+      score_points:         scorePoints,
+      participation_points: participationPoints,
+      record_bonus:         recordBonus,
+      record_value:         recordValue ?? null,
+    });
 
-    setEntries((prev) => [entry, ...prev]);
+    if (insErr) {
+      alert("Erreur enregistrement des points : " + insErr.message);
+      return;
+    }
 
-    // reset
+    // journal local (feedback instantané à l'écran)
+    setEntries((prev) => [
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        activity,
+        team,
+        scorePoints,
+        rawScore: getActivityType(activity) === "free" ? Number(freeScore) : undefined,
+        participationPoints,
+        recordBonus,
+        recordValue,
+        createdAt: new Date().toLocaleString(),
+      },
+      ...prev,
+    ]);
+
+    // reset des champs
     setTeam("");
     setDuelOutcome("");
     setTripleOutcome("");
@@ -270,8 +296,8 @@ export default function NewHeatPage() {
     setNewRecordValue("");
   }
 
-  // Classement global (admin uniquement)
-  const leaderboard = useMemo(() => {
+  /** 8) Mini-classement (local, juste indicatif; la page admin lit Supabase) */
+  const miniRows = useMemo(() => {
     type Row = {
       team: string;
       totalScorePoints: number;
@@ -291,16 +317,18 @@ export default function NewHeatPage() {
       row.totalScorePoints += e.scorePoints;
       row.totalParticipation += e.participationPoints;
       row.totalRecordBonus += e.recordBonus;
-      row.combined =
-        row.totalScorePoints + row.totalParticipation + row.totalRecordBonus;
+      row.combined = row.totalScorePoints + row.totalParticipation + row.totalRecordBonus;
       map.set(e.team, row);
     }
     return Array.from(map.values()).sort((a, b) => b.combined - a.combined);
   }, [entries]);
 
   if (role === null) return null;
+  const isAdmin = role === "admin";
+  const type = getActivityType(activity);
+  const currentRecord = records[activity] ?? DEFAULT_RECORDS[activity];
+  const recordsDisabled = NO_RECORD_ACTIVITIES.has(activity);
 
-  // petit composant bouton
   function Button({
     active,
     onClick,
@@ -325,11 +353,6 @@ export default function NewHeatPage() {
       </button>
     );
   }
-
-  const type = getActivityType(activity);
-  const currentRecord = records[activity] ?? DEFAULT_RECORDS[activity];
-  const recordsDisabled = NO_RECORD_ACTIVITIES.has(activity);
-  const isAdmin = role === "admin";
 
   return (
     <main className="min-h-screen py-6">
@@ -364,7 +387,7 @@ export default function NewHeatPage() {
         )}
       </div>
 
-      {/* Formulaire : équipe + points selon type + record manuel */}
+      {/* Formulaire */}
       <form onSubmit={onSubmit} className="space-y-4">
         <div className="rounded-2xl border border-neutral-200 bg-white p-4 space-y-4">
           {/* ÉQUIPE */}
@@ -494,7 +517,7 @@ export default function NewHeatPage() {
         </div>
       </form>
 
-      {/* Journal des saisies */}
+      {/* Journal des saisies (local) */}
       <section className="mt-6 space-y-3">
         <h2 className="text-lg font-semibold">Journal des saisies</h2>
 
@@ -543,11 +566,11 @@ export default function NewHeatPage() {
         )}
       </section>
 
-      {/* Mini-classement : visible SEULEMENT pour admin */}
+      {/* Mini-classement local : visible seulement pour admin (indicatif) */}
       {isAdmin && (
         <section className="mt-8 space-y-3">
-          <h2 className="text-lg font-semibold">Mini-classement (global)</h2>
-          <MiniLeaderboard entries={entries} />
+          <h2 className="text-lg font-semibold">Mini-classement (local)</h2>
+          <MiniLeaderboardLocal rows={miniRows} />
         </section>
       )}
 
@@ -567,37 +590,21 @@ export default function NewHeatPage() {
   );
 }
 
-function MiniLeaderboard({ entries }: { entries: Entry[] }) {
-  const rows = useMemo(() => {
-    type Row = {
-      team: string;
-      totalScorePoints: number;
-      totalParticipation: number;
-      totalRecordBonus: number;
-      combined: number;
-    };
-    const map = new Map<string, Row>();
-    for (const e of entries) {
-      const row = map.get(e.team) ?? {
-        team: e.team,
-        totalScorePoints: 0,
-        totalParticipation: 0,
-        totalRecordBonus: 0,
-        combined: 0,
-      };
-      row.totalScorePoints += e.scorePoints;
-      row.totalParticipation += e.participationPoints;
-      row.totalRecordBonus += e.recordBonus;
-      row.combined =
-        row.totalScorePoints + row.totalParticipation + row.totalRecordBonus;
-      map.set(e.team, row);
-    }
-    return Array.from(map.values()).sort((a, b) => b.combined - a.combined);
-  }, [entries]);
-
+/** --------- Composant mini-classement local --------- */
+function MiniLeaderboardLocal({
+  rows,
+}: {
+  rows: {
+    team: string;
+    totalScorePoints: number;
+    totalParticipation: number;
+    totalRecordBonus: number;
+    combined: number;
+  }[];
+}) {
   if (rows.length === 0) {
     return <p className="text-sm text-neutral-500">Pas encore de points à agréger.</p>;
-  }
+    }
 
   return (
     <div className="overflow-hidden rounded-2xl border border-neutral-200 bg-white">

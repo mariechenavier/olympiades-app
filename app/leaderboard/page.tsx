@@ -2,10 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
-/** --------- Config partagée (même dénominations que ta page de saisie) --------- */
-
-// Catégories (utiles si tu veux filtrer plus tard)
+/** --------- Config d’activités (pour afficher les records pertinents) --------- */
 const ACTIVITIES_DUEL = [
   "Accronomètre",
   "Jenga géant",
@@ -14,9 +13,7 @@ const ACTIVITIES_DUEL = [
   "Tir à la corde",
   "Tir croisé (électronique)",
 ];
-
 const ACTIVITIES_TRIPLE = ["Baby-foot humain"];
-
 const ACTIVITIES_RACE = [
   "Ballon coop’",
   "Blind test",
@@ -28,10 +25,7 @@ const ACTIVITIES_RACE = [
   "Question pour un champion",
   "Teamwalk (Ski Géant)",
 ];
-
 const ACTIVITIES_FREE = ["Archery Tag", "Tyro Basket"];
-
-// Liste globale (ordre d’affichage souhaité)
 const ACTIVITIES = [
   ...ACTIVITIES_DUEL,
   ...ACTIVITIES_TRIPLE,
@@ -39,7 +33,7 @@ const ACTIVITIES = [
   ...ACTIVITIES_FREE,
 ];
 
-// Activités SANS record (tu les as explicitement exclues du bonus + de l’UI)
+// Activités SANS record (pas d’affichage de record)
 const NO_RECORD_ACTIVITIES = new Set<string>([
   "Foulard musical",
   "Jenga géant",
@@ -50,7 +44,7 @@ const NO_RECORD_ACTIVITIES = new Set<string>([
   "Question pour un champion",
 ]);
 
-// Libellés par défaut pour l’affichage “Record à battre”
+// Libellés par défaut (au cas où aucun record n’a encore été saisi)
 type RecordInfo = { label: string; value?: string };
 const DEFAULT_RECORDS: Record<string, RecordInfo> = {
   "Accronomètre": { label: "Meilleur chrono (mm:ss ou s)" },
@@ -73,59 +67,130 @@ const DEFAULT_RECORDS: Record<string, RecordInfo> = {
   "Tyro Basket": { label: "Points d'équipe max" },
 };
 
-/** ---------------------- Types ---------------------- */
-type EntryLocal = {
+/** ---------------------- Types côté Supabase ---------------------- */
+type DbEntry = {
   id: string;
+  created_at: string;
   activity: string;
   team: string;
-  scorePoints: number;
-  rawScore?: number;
-  participationPoints: number;
-  recordBonus: number;
-  recordValue?: string;
-  createdAt: string;
+  score_points: number;
+  participation_points: number;
+  record_bonus: number;
+  record_value: string | null;
 };
+type RecordRow = { activity: string; label: string; value: string | null };
 
 /** ====================================================
  *                 Page Admin /leaderboard
  *  - Vérifie rôle admin
- *  - Charge scores + records depuis localStorage
- *  - Affiche Classement + Tableau des records
+ *  - Lit les scores et records depuis Supabase
+ *  - Temps réel sur entries et records
+ *  - Affiche Classement + Records
  * ==================================================== */
 export default function LeaderboardPage() {
   const router = useRouter();
 
   const [ready, setReady] = useState(false);
-  const [entries, setEntries] = useState<EntryLocal[]>([]);
+  const [entries, setEntries] = useState<DbEntry[]>([]);
   const [records, setRecords] = useState<Record<string, RecordInfo>>({});
 
-  // Contrôle du rôle + chargement des données locales
+  /** 1) Vérifier le rôle (admin) */
   useEffect(() => {
-    const role = localStorage.getItem("current-role");
+    const role = typeof window !== "undefined" ? localStorage.getItem("current-role") : null;
     if (role !== "admin") {
       router.replace("/login");
-      return;
+    } else {
+      setReady(true);
     }
-
-    // Journal de saisies
-    try {
-      const raw = localStorage.getItem("journal-saisies");
-      if (raw) setEntries(JSON.parse(raw));
-    } catch {}
-
-    // Records
-    try {
-      const rawR = localStorage.getItem("activity-records");
-      if (rawR) setRecords(JSON.parse(rawR));
-      else setRecords(DEFAULT_RECORDS); // fallback
-    } catch {
-      setRecords(DEFAULT_RECORDS);
-    }
-
-    setReady(true);
   }, [router]);
 
-  // Agrégation du classement
+  /** 2) Charger les scores + abonnement temps réel */
+  useEffect(() => {
+    if (!ready) return;
+
+    let mounted = true;
+
+    async function loadEntries() {
+      const { data, error } = await supabase
+        .from("entries")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (!error && data && mounted) {
+        setEntries(data as DbEntry[]);
+      }
+    }
+    loadEntries();
+
+    const channel = supabase
+      .channel("entries-realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "entries" },
+        (payload) => {
+          const row = payload.new as DbEntry;
+          setEntries((prev) => [row, ...prev]);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      mounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [ready]);
+
+  /** 3) Charger les records + abonnement temps réel */
+  useEffect(() => {
+    if (!ready) return;
+
+    let mounted = true;
+
+    async function loadRecords() {
+      const { data, error } = await supabase.from("records").select("*");
+      if (!error && data && mounted) {
+        const map: Record<string, RecordInfo> = { ...DEFAULT_RECORDS };
+        for (const r of data as RecordRow[]) {
+          map[r.activity] = { label: r.label, value: r.value ?? undefined };
+        }
+        setRecords(map);
+      } else if (mounted) {
+        setRecords({ ...DEFAULT_RECORDS });
+      }
+    }
+    loadRecords();
+
+    const channel = supabase
+      .channel("records-realtime")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "records" },
+        (payload) => {
+          const r = payload.new as RecordRow;
+          setRecords((prev) => ({
+            ...prev,
+            [r.activity]: { label: r.label, value: r.value ?? undefined },
+          }));
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "records" },
+        (payload) => {
+          const r = payload.new as RecordRow;
+          setRecords((prev) => ({
+            ...prev,
+            [r.activity]: { label: r.label, value: r.value ?? undefined },
+          }));
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [ready]);
+
+  /** 4) Agrégation du classement (à partir des colonnes Supabase) */
   const rows = useMemo(() => {
     type Row = {
       team: string;
@@ -144,9 +209,9 @@ export default function LeaderboardPage() {
         totalRecordBonus: 0,
         combined: 0,
       };
-      row.totalScorePoints += e.scorePoints;
-      row.totalParticipation += e.participationPoints;
-      row.totalRecordBonus += e.recordBonus;
+      row.totalScorePoints += e.score_points;
+      row.totalParticipation += e.participation_points;
+      row.totalRecordBonus += e.record_bonus;
       row.combined = row.totalScorePoints + row.totalParticipation + row.totalRecordBonus;
       map.set(e.team, row);
     }
@@ -154,21 +219,16 @@ export default function LeaderboardPage() {
     return Array.from(map.values()).sort((a, b) => b.combined - a.combined);
   }, [entries]);
 
-  // Records à afficher : uniquement les activités qui acceptent un record
+  if (!ready) return null;
+
+  // Records à afficher : uniquement activités avec record autorisé, dans l’ordre défini
   const recordsForDisplay = useMemo(() => {
-    // On part de la liste d’activités (ordre fixé), on filtre celles avec record autorisé
     const withRecord = ACTIVITIES.filter((a) => !NO_RECORD_ACTIVITIES.has(a));
-    // Pour chaque activité, on compose le libellé + valeur locale si existante
     return withRecord.map((activity) => {
-      const fromLocal = records[activity];
-      const base = DEFAULT_RECORDS[activity];
-      const label = fromLocal?.label ?? base?.label ?? "Record";
-      const value = fromLocal?.value ?? base?.value ?? undefined; // si jamais stockée
-      return { activity, label, value };
+      const r = records[activity] ?? DEFAULT_RECORDS[activity] ?? { label: "Record" };
+      return { activity, label: r.label, value: r.value };
     });
   }, [records]);
-
-  if (!ready) return null;
 
   return (
     <main className="min-h-screen py-6">
@@ -247,7 +307,8 @@ export default function LeaderboardPage() {
         </div>
 
         <p className="text-xs text-neutral-500">
-          Astuce : les records se mettent à jour automatiquement quand un animateur coche “Record battu ?” et saisit la nouvelle valeur sur la page de saisie.
+          Les records se mettent à jour automatiquement quand un animateur coche “Record battu ?”
+          et saisit la nouvelle valeur sur la page de saisie.
         </p>
       </section>
     </main>
