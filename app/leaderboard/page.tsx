@@ -83,6 +83,10 @@ export default function LeaderboardPage() {
   const [entries, setEntries] = useState<DbEntry[]>([]);
   const [records, setRecords] = useState<Record<string, RecordInfo>>({ ...DEFAULT_RECORDS });
 
+  // états de chargement des actions admin
+  const [resettingScores, setResettingScores] = useState(false);
+  const [resettingRecords, setResettingRecords] = useState(false);
+
   // 1) Vérifier rôle
   useEffect(() => {
     const role = typeof window !== "undefined" ? localStorage.getItem("current-role") : null;
@@ -192,19 +196,69 @@ export default function LeaderboardPage() {
     });
   }, [records]);
 
+  // 6) Actions admin : reset scores / reset records
+  async function handleResetScores() {
+    if (!confirm("Confirmer la réinitialisation de TOUS les scores ? Cette action est irréversible.")) return;
+    setResettingScores(true);
+    // Supabase demande un filtre pour delete-all : on met une condition toujours vraie
+    const { error } = await supabase
+      .from("entries")
+      .delete()
+      .neq("id", "00000000-0000-0000-0000-000000000000");
+    setResettingScores(false);
+    if (error) {
+      alert("Erreur lors de la réinitialisation des scores : " + error.message);
+      return;
+    }
+    setEntries([]);
+  }
+
+  async function handleResetRecords() {
+    if (!confirm("Confirmer la réinitialisation des valeurs de records (les libellés seront conservés) ?")) return;
+    setResettingRecords(true);
+    const { error } = await supabase
+      .from("records")
+      .update({ value: null })
+      .not("activity", "is", null); // filtre toujours vrai
+    setResettingRecords(false);
+    if (error) {
+      alert("Erreur lors de la réinitialisation des records : " + error.message);
+      return;
+    }
+    setRecords({ ...DEFAULT_RECORDS }); // on conserve les libellés, valeurs vides
+  }
+
   return (
     <main className="min-h-screen py-6">
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-xl font-bold">Classement & Records (Administration)</h1>
-        <button
-          onClick={() => {
-            localStorage.removeItem("current-role");
-            location.href = "/login";
-          }}
-          className="rounded-2xl border border-neutral-300 bg-white px-4 py-2 text-sm"
-        >
-          Déconnexion
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleResetScores}
+            disabled={resettingScores}
+            className="rounded-2xl border border-red-300 bg-white px-3 py-2 text-sm text-red-700 disabled:opacity-60"
+            title="Vider toutes les saisies de scores"
+          >
+            {resettingScores ? "Réinitialisation…" : "Réinitialiser scores"}
+          </button>
+          <button
+            onClick={handleResetRecords}
+            disabled={resettingRecords}
+            className="rounded-2xl border border-amber-300 bg-white px-3 py-2 text-sm text-amber-700 disabled:opacity-60"
+            title="Remettre tous les records à vide (conserve les libellés)"
+          >
+            {resettingRecords ? "Réinitialisation…" : "Réinitialiser records"}
+          </button>
+          <button
+            onClick={() => {
+              localStorage.removeItem("current-role");
+              location.href = "/login";
+            }}
+            className="rounded-2xl border border-neutral-300 bg-white px-3 py-2 text-sm"
+          >
+            Déconnexion
+          </button>
+        </div>
       </div>
 
       {!ready ? (
