@@ -139,21 +139,23 @@ export default function NewHeatPage() {
   }, [router]);
 
   /** 2) Charger les records depuis Supabase au montage */
-  useEffect(() => {
-    async function loadRecords() {
-      const { data, error } = await supabase.from("records").select("*");
-      if (!error && data) {
-        const map: Record<string, RecordInfo> = { ...DEFAULT_RECORDS };
-        for (const r of data as any[]) {
-          map[r.activity] = { label: r.label, value: r.value ?? undefined };
-        }
-        setRecords(map);
-      } else {
-        setRecords({ ...DEFAULT_RECORDS });
+ useEffect(() => {
+  type RecordRow = { activity: string; label: string; value: string | null };
+  async function loadRecords() {
+    const { data } = await supabase.from("records").select("*");
+    if (data) {
+      const map: Record<string, { label: string; value?: string }> = { ...DEFAULT_RECORDS };
+      for (const r of data as RecordRow[]) {
+        map[r.activity] = { label: r.label, value: r.value ?? undefined };
       }
+      setRecords(map);
+    } else {
+      setRecords({ ...DEFAULT_RECORDS });
     }
-    loadRecords();
-  }, []);
+  }
+  loadRecords();
+}, []);
+
 
   /** 3) Reset des contrôles quand l’activité change */
   useEffect(() => {
