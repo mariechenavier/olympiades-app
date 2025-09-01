@@ -86,6 +86,8 @@ export default function LeaderboardPage() {
   // états de chargement des actions admin
   const [resettingScores, setResettingScores] = useState(false);
   const [resettingRecords, setResettingRecords] = useState(false);
+  const [recordHolders, setRecordHolders] = useState<Record<string, string | undefined>>({});
+
 
   // 1) Vérifier rôle
   useEffect(() => {
@@ -159,6 +161,42 @@ export default function LeaderboardPage() {
       supabase.removeChannel(channel);
     };
   }, [ready]);
+  useEffect(() => {
+  // Quand les records changent (nouvelle valeur), on recalcule les détenteurs
+  async function loadHolders() {
+    // On récupère les entrées ayant donné un bonus de record, les plus récentes d’abord
+    const { data, error } = await supabase
+      .from("entries")
+      .select("activity, team, record_value, created_at")
+      .gt("record_bonus", 0)
+      .order("created_at", { ascending: false });
+
+    if (error || !data) {
+      setRecordHolders({});
+      return;
+    }
+
+    const map: Record<string, string | undefined> = {};
+    // records = état actuel (valeur officielle du record par activité)
+    for (const row of data) {
+      // Si on a déjà trouvé un détenteur pour cette activité, on laisse le premier (le plus récent)
+      if (map[row.activity]) continue;
+
+      const currentVal = records[row.activity]?.value;
+      if (!currentVal) continue;
+
+      // On considère détenteur si la valeur de l’entrée record correspond à la valeur officielle actuelle
+      if (row.record_value === currentVal) {
+        map[row.activity] = row.team;
+      }
+    }
+
+    setRecordHolders(map);
+  }
+
+  loadHolders();
+}, [records, supabase]);
+
 
   // 4) Agrégation
   const rows = useMemo(() => {
@@ -306,18 +344,21 @@ export default function LeaderboardPage() {
             <div className="overflow-hidden rounded-2xl border border-neutral-200 bg-white">
               <table className="w-full text-sm">
                 <thead className="bg-neutral-50">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Activité</th>
-                    <th className="px-3 py-2 text-left">Record à battre</th>
-                    <th className="px-3 py-2 text-left">Valeur actuelle</th>
-                  </tr>
-                </thead>
+  <tr>
+    <th className="px-3 py-2 text-left">Activité</th>
+    <th className="px-3 py-2 text-left">Record à battre</th>
+    <th className="px-3 py-2 text-left">Valeur actuelle</th>
+    <th className="px-3 py-2 text-left">Équipe détentrice</th> {/* + */}
+  </tr>
+</thead>
+
                 <tbody>
                   {recordsForDisplay.map((r) => (
                     <tr key={r.activity} className="border-t">
                       <td className="px-3 py-2">{r.activity}</td>
                       <td className="px-3 py-2">{r.label}</td>
                       <td className="px-3 py-2">{r.value ?? "—"}</td>
+                      <td className="px-3 py-2">{recordHolders[r.activity] ?? "—"}</td> {/* + */}
                     </tr>
                   ))}
                 </tbody>
