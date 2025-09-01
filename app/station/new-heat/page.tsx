@@ -217,11 +217,22 @@ export default function NewHeatPage() {
       return;
     }
 
-    // participation : calcule le nombre de passages déjà faits par cette équipe sur cette activité (journal local = feedback, pas critique)
-    const previousPasses = entries.filter(
-      (en) => en.activity === activity && en.team === team
-    ).length;
-    const participationPoints = participationBonusForNthPass(previousPasses);
+   // 2) Points de participation : compter les passages DÉJÀ enregistrés en base
+const { count, error: cntErr } = await supabase
+  .from("entries")
+  .select("id", { count: "exact", head: true })
+  .eq("activity", activity)
+  .eq("team", team);
+
+if (cntErr) {
+  alert("Erreur lors du calcul des participations : " + cntErr.message);
+  return;
+}
+
+// count = nb de passages déjà en base
+const previousPasses = count ?? 0;
+const participationPoints = participationBonusForNthPass(previousPasses);
+
 
     // record : si activé et coché, upsert dans Supabase
     const recordsDisabled = NO_RECORD_ACTIVITIES.has(activity);
