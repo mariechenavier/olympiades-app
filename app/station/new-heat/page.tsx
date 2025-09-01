@@ -84,16 +84,15 @@ const DEFAULT_RECORDS: Record<string, RecordInfo> = {
 };
 
 /** ---------------- Types ---------------- */
-type EntryLocal = {
+type DbEntry = {
   id: string;
+  created_at: string;
   activity: string;
   team: string;
-  scorePoints: number;         // points d’épreuve (ou valeur libre utilisée comme points pour "free")
-  rawScore?: number;           // valeur libre affichée (free)
-  participationPoints: number; // 10/5/2/0
-  recordBonus: number;         // 20 ou 0
-  recordValue?: string;        // valeur saisie si record battu
-  createdAt: string;
+  score_points: number;
+  participation_points: number;
+  record_bonus: number;
+  record_value: string | null;
 };
 
 /** ---------------- Utilitaires ---------------- */
@@ -125,8 +124,9 @@ export default function NewHeatPage() {
   const [recordBeaten, setRecordBeaten] = useState<boolean>(false);
   const [newRecordValue, setNewRecordValue] = useState<string>("");
 
-  // Journal local (feedback visuel)
-  const [entries, setEntries] = useState<EntryLocal[]>([]);
+  // Journal : on stocke directement les lignes venues de Supabase
+  const [entries, setEntries] = useState<DbEntry[]>([]);
+  const [loadingEntries, setLoadingEntries] = useState(false);
 
   /** 1) Auth locale : exiger un rôle (admin/animateur), sinon login */
   useEffect(() => {
@@ -139,25 +139,40 @@ export default function NewHeatPage() {
   }, [router]);
 
   /** 2) Charger les records depuis Supabase au montage */
- useEffect(() => {
-  type RecordRow = { activity: string; label: string; value: string | null };
-  async function loadRecords() {
-    const { data } = await supabase.from("records").select("*");
-    if (data) {
-      const map: Record<string, { label: string; value?: string }> = { ...DEFAULT_RECORDS };
-      for (const r of data as RecordRow[]) {
-        map[r.activity] = { label: r.label, value: r.value ?? undefined };
+  useEffect(() => {
+    type RecordRow = { activity: string; label: string; value: string | null };
+    async function loadRecords() {
+      const { data } = await supabase.from("records").select("*");
+      if (data) {
+        const map: Record<string, RecordInfo> = { ...DEFAULT_RECORDS };
+        for (const r of data as RecordRow[]) {
+          map[r.activity] = { label: r.label, value: r.value ?? undefined };
+        }
+        setRecords(map);
+      } else {
+        setRecords({ ...DEFAULT_RECORDS });
       }
-      setRecords(map);
-    } else {
-      setRecords({ ...DEFAULT_RECORDS });
     }
-  }
-  loadRecords();
-}, []);
+    loadRecords();
+  }, []);
 
+  /** 3) Charger le journal depuis Supabase (persistant) */
+  useEffect(() => {
+    async function loadEntries() {
+      setLoadingEntries(true);
+      // On récupère les dernières 100 saisies (toutes activités confondues), plus simple et fiable
+      const { data, error } = await supabase
+        .from("entries")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100);
+      setLoadingEntries(false);
+      if (!error && data) setEntries(data as DbEntry[]);
+    }
+    loadEntries();
+  }, []);
 
-  /** 3) Reset des contrôles quand l’activité change */
+  /** 4) Reset des contrôles quand l’activité change */
   useEffect(() => {
     setDuelOutcome("");
     setTripleOutcome("");
@@ -167,18 +182,25 @@ export default function NewHeatPage() {
     setNewRecordValue("");
   }, [activity]);
 
-  /** 4) Saisie stricte numérique pour "free" */
+  /** 5) Saisie stricte numérique pour "free" */
   function handleFreeScoreChange(e: React.ChangeEvent<HTMLInputElement>) {
     const val = e.target.value.replace(/\D/g, "");
     setFreeScore(val);
   }
 
-  /** 5) Suppression d’une ligne du journal (local uniquement) */
-  function deleteEntry(id: string) {
+  /** 6) Suppression d’une ligne : supprime en base, puis côté UI */
+  async function deleteEntry(id: string) {
+    const ok = confirm("Supprimer définitivement cette saisie ? (action irréversible)");
+    if (!ok) return;
+    const { error } = await supabase.from("entries").delete().eq("id", id);
+    if (error) {
+      alert("Erreur lors de la suppression : " + error.message);
+      return;
+    }
     setEntries((prev) => prev.filter((e) => e.id !== id));
   }
 
-  /** 6) Calcul des points d’épreuve selon le type */
+  /** 7) Calcul des points d’épreuve selon le type */
   function computeScorePoints(type: ActivityType): number | null {
     if (type === "duel") {
       if (duelOutcome === "win") return 10;
@@ -203,7 +225,7 @@ export default function NewHeatPage() {
     return Number(freeScore);
   }
 
-  /** 7) Soumission : envoie dans Supabase + journal local */
+  /** 8) Soumission : compte les participations depuis Supabase + insert + upsert record */
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
 
@@ -217,27 +239,25 @@ export default function NewHeatPage() {
       return;
     }
 
-   // 2) Points de participation : compter les passages DÉJÀ enregistrés en base
-const { count, error: cntErr } = await supabase
-  .from("entries")
-  .select("id", { count: "exact", head: true })
-  .eq("activity", activity)
-  .eq("team", team);
+    // Participation : compter les passages DÉJÀ enregistrés en base (persistant)
+    const { count, error: cntErr } = await supabase
+      .from("entries")
+      .select("id", { count: "exact", head: true })
+      .eq("activity", activity)
+      .eq("team", team);
 
-if (cntErr) {
-  alert("Erreur lors du calcul des participations : " + cntErr.message);
-  return;
-}
+    if (cntErr) {
+      alert("Erreur lors du calcul des participations : " + cntErr.message);
+      return;
+    }
 
-// count = nb de passages déjà en base
-const previousPasses = count ?? 0;
-const participationPoints = participationBonusForNthPass(previousPasses);
+    const previousPasses = count ?? 0;
+    const participationPoints = participationBonusForNthPass(previousPasses);
 
-
-    // record : si activé et coché, upsert dans Supabase
+    // Record : si activé et coché, upsert dans Supabase
     const recordsDisabled = NO_RECORD_ACTIVITIES.has(activity);
     let recordBonus = 0;
-    let recordValue: string | undefined = undefined;
+    let recordValue: string | null = null;
 
     if (!recordsDisabled && recordBeaten) {
       if (!newRecordValue.trim()) {
@@ -261,45 +281,36 @@ const participationPoints = participationBonusForNthPass(previousPasses);
         return;
       }
 
-      // mettre à jour l’état local d’affichage
+      // mettre à jour l’état local d’affichage (record)
       setRecords((prev) => ({
         ...prev,
-        [activity]: { label, value: recordValue },
+        [activity]: { label, value: recordValue ?? undefined },
       }));
     }
 
-    // insertion de la saisie dans Supabase
-    const { error: insErr } = await supabase.from("entries").insert({
-      activity,
-      team,
-      score_points:         scorePoints,
-      participation_points: participationPoints,
-      record_bonus:         recordBonus,
-      record_value:         recordValue ?? null,
-    });
+    // Insérer la saisie et récupérer la ligne créée (id réel)
+    const { data: inserted, error: insErr } = await supabase
+      .from("entries")
+      .insert({
+        activity,
+        team,
+        score_points:         scorePoints,
+        participation_points: participationPoints,
+        record_bonus:         recordBonus,
+        record_value:         recordValue,
+      })
+      .select("*")
+      .single();
 
-    if (insErr) {
-      alert("Erreur enregistrement des points : " + insErr.message);
+    if (insErr || !inserted) {
+      alert("Erreur enregistrement des points : " + (insErr?.message ?? "insert null"));
       return;
     }
 
-    // journal local (feedback instantané à l'écran)
-    setEntries((prev) => [
-      {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        activity,
-        team,
-        scorePoints,
-        rawScore: getActivityType(activity) === "free" ? Number(freeScore) : undefined,
-        participationPoints,
-        recordBonus,
-        recordValue,
-        createdAt: new Date().toLocaleString(),
-      },
-      ...prev,
-    ]);
+    // Ajouter en haut du journal (persistance + affichage)
+    setEntries((prev) => [inserted as DbEntry, ...prev]);
 
-    // reset des champs
+    // Reset des champs
     setTeam("");
     setDuelOutcome("");
     setTripleOutcome("");
@@ -309,7 +320,7 @@ const participationPoints = participationBonusForNthPass(previousPasses);
     setNewRecordValue("");
   }
 
-  /** 8) Mini-classement (local, juste indicatif; la page admin lit Supabase) */
+  /** 9) Mini-classement local (facultatif) : basé sur entries chargés */
   const miniRows = useMemo(() => {
     type Row = {
       team: string;
@@ -327,9 +338,9 @@ const participationPoints = participationBonusForNthPass(previousPasses);
         totalRecordBonus: 0,
         combined: 0,
       };
-      row.totalScorePoints += e.scorePoints;
-      row.totalParticipation += e.participationPoints;
-      row.totalRecordBonus += e.recordBonus;
+      row.totalScorePoints += e.score_points;
+      row.totalParticipation += e.participation_points;
+      row.totalRecordBonus += e.record_bonus;
       row.combined = row.totalScorePoints + row.totalParticipation + row.totalRecordBonus;
       map.set(e.team, row);
     }
@@ -530,11 +541,12 @@ const participationPoints = participationBonusForNthPass(previousPasses);
         </div>
       </form>
 
-      {/* Journal des saisies (local) */}
+      {/* Journal des saisies (chargé depuis Supabase) */}
       <section className="mt-6 space-y-3">
-        <h2 className="text-lg font-semibold">Journal des saisies</h2>
 
-        {entries.length === 0 ? (
+        {loadingEntries ? (
+          <p className="text-sm text-neutral-500">Chargement…</p>
+        ) : entries.length === 0 ? (
           <p className="text-sm text-neutral-500">Aucune saisie pour le moment.</p>
         ) : (
           <ul className="space-y-2">
@@ -542,25 +554,21 @@ const participationPoints = participationBonusForNthPass(previousPasses);
               <li key={e.id} className="rounded-2xl border border-neutral-200 bg-white p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="text-sm text-neutral-500">{e.createdAt}</div>
+                    <div className="text-sm text-neutral-500">
+                      {new Date(e.created_at).toLocaleString()}
+                    </div>
                     <div className="mt-1 text-base">
                       <span className="font-medium">{e.team}</span> · {e.activity}
                     </div>
-                    {e.rawScore !== undefined ? (
-                      <div className="text-sm text-neutral-700">
-                        Score libre : {e.rawScore} (points épreuve = {e.scorePoints})
-                      </div>
-                    ) : (
-                      <div className="text-sm text-neutral-700">
-                        Points épreuve : {e.scorePoints}
-                      </div>
-                    )}
                     <div className="text-sm text-neutral-700">
-                      Points participation : {e.participationPoints}
+                      Points épreuve : {e.score_points}
                     </div>
-                    {e.recordBonus > 0 && (
+                    <div className="text-sm text-neutral-700">
+                      Points participation : {e.participation_points}
+                    </div>
+                    {e.record_bonus > 0 && (
                       <div className="text-sm text-green-700">
-                        Record battu : +{e.recordBonus} pts — nouveau record = {e.recordValue}
+                        Record battu : +{e.record_bonus} pts — valeur = {e.record_value}
                       </div>
                     )}
                   </div>
@@ -579,7 +587,7 @@ const participationPoints = participationBonusForNthPass(previousPasses);
         )}
       </section>
 
-      {/* Mini-classement local : visible seulement pour admin (indicatif) */}
+      {/* Mini-classement local : indicatif */}
       {isAdmin && (
         <section className="mt-8 space-y-3">
           <h2 className="text-lg font-semibold">Mini-classement (local)</h2>
