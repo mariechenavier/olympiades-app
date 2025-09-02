@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 
+/** ---------- Config activités (pour affichage des records) ---------- */
 const ACTIVITIES_DUEL = [
   "Accronomètre",
   "Jenga géant",
@@ -32,6 +33,7 @@ const ACTIVITIES = [
   ...ACTIVITIES_FREE,
 ];
 
+// Activités sans record (on n’affiche pas le champ record côté saisie, mais ici on montre juste l’état)
 const NO_RECORD_ACTIVITIES = new Set<string>([
   "Foulard musical",
   "Jenga géant",
@@ -64,11 +66,12 @@ const DEFAULT_RECORDS: Record<string, RecordInfo> = {
   "Tyro Basket": { label: "Points d'équipe max" },
 };
 
+/** ---------- Types DB ---------- */
 type DbEntry = {
   id: string;
   created_at: string;
   activity: string;
-  team: string;
+  team: string; // ex: "2nd A 1", "2nd MEMN 4", ou "2nd A"
   score_points: number;
   participation_points: number;
   record_bonus: number;
@@ -76,27 +79,43 @@ type DbEntry = {
 };
 type RecordRow = { activity: string; label: string; value: string | null };
 
+/** ---------- Helper : agrège "2nd A 1" -> "2nd A" ---------- */
+// "2nd A 1" -> "2nd A" ; "2nd MTNE A 3" -> "2nd MTNE A" ; si pas de numéro final, on garde tel quel
+function classKeyFromTeam(team: string): string {
+  const parts = team.trim().split(/\s+/);
+  if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1])) {
+    return parts.slice(0, -1).join(" ");
+  }
+  return team;
+}
+
+/** ======================================================
+ *              Page Admin /leaderboard
+ *  - Vérifie rôle admin
+ *  - Lit entries + records (Realtime)
+ *  - Affiche Classement FINAL agrégé par CLASSE (pas de sous-groupes)
+ *  - Affiche tableau Records + équipe détentrice
+ *  - Boutons reset scores / records
+ * ====================================================== */
 export default function LeaderboardPage() {
   const router = useRouter();
 
   const [ready, setReady] = useState(false);
   const [entries, setEntries] = useState<DbEntry[]>([]);
   const [records, setRecords] = useState<Record<string, RecordInfo>>({ ...DEFAULT_RECORDS });
-
-  // états de chargement des actions admin
-  const [resettingScores, setResettingScores] = useState(false);
-  const [resettingRecords, setResettingRecords] = useState(false);
   const [recordHolders, setRecordHolders] = useState<Record<string, string | undefined>>({});
 
+  const [resettingScores, setResettingScores] = useState(false);
+  const [resettingRecords, setResettingRecords] = useState(false);
 
-  // 1) Vérifier rôle
+  /** 1) Vérifier rôle */
   useEffect(() => {
     const role = typeof window !== "undefined" ? localStorage.getItem("current-role") : null;
     if (role !== "admin") router.replace("/login");
     else setReady(true);
   }, [router]);
 
-  // 2) Charger entries + realtime
+  /** 2) Charger entries + realtime */
   useEffect(() => {
     if (!ready) return;
 
@@ -122,7 +141,7 @@ export default function LeaderboardPage() {
     };
   }, [ready]);
 
-  // 3) Charger records + realtime
+  /** 3) Charger records + realtime */
   useEffect(() => {
     if (!ready) return;
 
@@ -144,7 +163,10 @@ export default function LeaderboardPage() {
         { event: "INSERT", schema: "public", table: "records" },
         (payload) => {
           const r = payload.new as RecordRow;
-          setRecords((prev) => ({ ...prev, [r.activity]: { label: r.label, value: r.value ?? undefined } }));
+          setRecords((prev) => ({
+            ...prev,
+            [r.activity]: { label: r.label, value: r.value ?? undefined },
+          }));
         }
       )
       .on(
@@ -152,7 +174,10 @@ export default function LeaderboardPage() {
         { event: "UPDATE", schema: "public", table: "records" },
         (payload) => {
           const r = payload.new as RecordRow;
-          setRecords((prev) => ({ ...prev, [r.activity]: { label: r.label, value: r.value ?? undefined } }));
+          setRecords((prev) => ({
+            ...prev,
+            [r.activity]: { label: r.label, value: r.value ?? undefined },
+          }));
         }
       )
       .subscribe();
@@ -161,56 +186,51 @@ export default function LeaderboardPage() {
       supabase.removeChannel(channel);
     };
   }, [ready]);
+
+  /** 4) Recalcul des détenteurs quand la valeur officielle d’un record change */
   useEffect(() => {
-  // Quand les records changent (nouvelle valeur), on recalcule les détenteurs
-  async function loadHolders() {
-    // On récupère les entrées ayant donné un bonus de record, les plus récentes d’abord
-    const { data, error } = await supabase
-      .from("entries")
-      .select("activity, team, record_value, created_at")
-      .gt("record_bonus", 0)
-      .order("created_at", { ascending: false });
+    async function loadHolders() {
+      const { data, error } = await supabase
+        .from("entries")
+        .select("activity, team, record_value, created_at, record_bonus")
+        .gt("record_bonus", 0)
+        .order("created_at", { ascending: false });
 
-    if (error || !data) {
-      setRecordHolders({});
-      return;
-    }
-
-    const map: Record<string, string | undefined> = {};
-    // records = état actuel (valeur officielle du record par activité)
-    for (const row of data) {
-      // Si on a déjà trouvé un détenteur pour cette activité, on laisse le premier (le plus récent)
-      if (map[row.activity]) continue;
-
-      const currentVal = records[row.activity]?.value;
-      if (!currentVal) continue;
-
-      // On considère détenteur si la valeur de l’entrée record correspond à la valeur officielle actuelle
-      if (row.record_value === currentVal) {
-        map[row.activity] = row.team;
+      if (error || !data) {
+        setRecordHolders({});
+        return;
       }
+
+      const map: Record<string, string | undefined> = {};
+      for (const row of data) {
+        if (map[row.activity]) continue; // on garde le plus récent qui matche
+        const official = records[row.activity]?.value;
+        if (!official) continue;
+        if (row.record_value === official) {
+          map[row.activity] = row.team;
+        }
+      }
+      setRecordHolders(map);
     }
 
-    setRecordHolders(map);
-  }
+    loadHolders();
+  }, [records]);
 
-  loadHolders();
-}, [records, supabase]);
-
-
-  // 4) Agrégation
-  const rows = useMemo(() => {
+  /** 5) CLASSEMENT FINAL agrégé par CLASSE (pas de sous-groupes) */
+  const classRows = useMemo(() => {
     type Row = {
-      team: string;
+      className: string;
       totalScorePoints: number;
       totalParticipation: number;
       totalRecordBonus: number;
       combined: number;
     };
     const map = new Map<string, Row>();
+
     for (const e of entries) {
-      const row = map.get(e.team) ?? {
-        team: e.team,
+      const key = classKeyFromTeam(e.team); // <-- agrégation par classe
+      const row = map.get(key) ?? {
+        className: key,
         totalScorePoints: 0,
         totalParticipation: 0,
         totalRecordBonus: 0,
@@ -220,12 +240,13 @@ export default function LeaderboardPage() {
       row.totalParticipation += e.participation_points;
       row.totalRecordBonus += e.record_bonus;
       row.combined = row.totalScorePoints + row.totalParticipation + row.totalRecordBonus;
-      map.set(e.team, row);
+      map.set(key, row);
     }
+
     return Array.from(map.values()).sort((a, b) => b.combined - a.combined);
   }, [entries]);
 
-  // 5) Préparer records à afficher
+  /** 6) Records à afficher (ordre fixé, sans activités exclues) */
   const recordsForDisplay = useMemo(() => {
     const withRecord = ACTIVITIES.filter((a) => !NO_RECORD_ACTIVITIES.has(a));
     return withRecord.map((activity) => {
@@ -234,21 +255,21 @@ export default function LeaderboardPage() {
     });
   }, [records]);
 
-  // 6) Actions admin : reset scores / reset records
+  /** 7) Actions admin */
   async function handleResetScores() {
     if (!confirm("Confirmer la réinitialisation de TOUS les scores ? Cette action est irréversible.")) return;
     setResettingScores(true);
-    // Supabase demande un filtre pour delete-all : on met une condition toujours vraie
     const { error } = await supabase
       .from("entries")
       .delete()
-      .neq("id", "00000000-0000-0000-0000-000000000000");
+      .neq("id", "00000000-0000-0000-0000-000000000000"); // filtre toujours vrai
     setResettingScores(false);
     if (error) {
       alert("Erreur lors de la réinitialisation des scores : " + error.message);
       return;
     }
     setEntries([]);
+    setRecordHolders({});
   }
 
   async function handleResetRecords() {
@@ -263,13 +284,19 @@ export default function LeaderboardPage() {
       alert("Erreur lors de la réinitialisation des records : " + error.message);
       return;
     }
-    setRecords({ ...DEFAULT_RECORDS }); // on conserve les libellés, valeurs vides
+    // conserver les libellés, vider les valeurs
+    const blank: Record<string, RecordInfo> = {};
+    for (const k of Object.keys(DEFAULT_RECORDS)) {
+      blank[k] = { label: DEFAULT_RECORDS[k].label, value: undefined };
+    }
+    setRecords(blank);
+    setRecordHolders({});
   }
 
   return (
     <main className="min-h-screen py-6">
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-xl font-bold">Classement & Records (Administration)</h1>
+        <h1 className="text-xl font-bold">Classement (par classe) & Records</h1>
         <div className="flex items-center gap-2">
           <button
             onClick={handleResetScores}
@@ -303,10 +330,10 @@ export default function LeaderboardPage() {
         <p className="text-sm text-neutral-500">Chargement…</p>
       ) : (
         <>
-          {/* Classement */}
+          {/* Classement final (agrégé par classe) */}
           <section className="space-y-3 mb-8">
-            <h2 className="text-lg font-semibold">Classement global</h2>
-            {rows.length === 0 ? (
+            <h2 className="text-lg font-semibold">Classement final (par classe)</h2>
+            {classRows.length === 0 ? (
               <p className="text-sm text-neutral-500">Aucune donnée pour le moment.</p>
             ) : (
               <div className="overflow-hidden rounded-2xl border border-neutral-200 bg-white">
@@ -314,7 +341,7 @@ export default function LeaderboardPage() {
                   <thead className="bg-neutral-50">
                     <tr>
                       <th className="px-3 py-2 text-left">#</th>
-                      <th className="px-3 py-2 text-left">Équipe</th>
+                      <th className="px-3 py-2 text-left">Classe</th>
                       <th className="px-3 py-2 text-right">Points épreuve</th>
                       <th className="px-3 py-2 text-right">Participation</th>
                       <th className="px-3 py-2 text-right">Bonus record</th>
@@ -322,10 +349,10 @@ export default function LeaderboardPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {rows.map((row, idx) => (
-                      <tr key={row.team} className="border-t">
+                    {classRows.map((row, idx) => (
+                      <tr key={row.className} className="border-t">
                         <td className="px-3 py-2">{idx + 1}</td>
-                        <td className="px-3 py-2">{row.team}</td>
+                        <td className="px-3 py-2">{row.className}</td>
                         <td className="px-3 py-2 text-right">{row.totalScorePoints}</td>
                         <td className="px-3 py-2 text-right">{row.totalParticipation}</td>
                         <td className="px-3 py-2 text-right">{row.totalRecordBonus}</td>
@@ -338,32 +365,36 @@ export default function LeaderboardPage() {
             )}
           </section>
 
-          {/* Records */}
+          {/* Records + équipe détentrice */}
           <section className="space-y-3">
             <h2 className="text-lg font-semibold">Meilleurs records par activité</h2>
             <div className="overflow-hidden rounded-2xl border border-neutral-200 bg-white">
               <table className="w-full text-sm">
                 <thead className="bg-neutral-50">
-  <tr>
-    <th className="px-3 py-2 text-left">Activité</th>
-    <th className="px-3 py-2 text-left">Record à battre</th>
-    <th className="px-3 py-2 text-left">Valeur actuelle</th>
-    <th className="px-3 py-2 text-left">Équipe détentrice</th> {/* + */}
-  </tr>
-</thead>
-
+                  <tr>
+                    <th className="px-3 py-2 text-left">Activité</th>
+                    <th className="px-3 py-2 text-left">Record à battre</th>
+                    <th className="px-3 py-2 text-left">Valeur actuelle</th>
+                    <th className="px-3 py-2 text-left">Équipe détentrice</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {recordsForDisplay.map((r) => (
                     <tr key={r.activity} className="border-t">
                       <td className="px-3 py-2">{r.activity}</td>
                       <td className="px-3 py-2">{r.label}</td>
                       <td className="px-3 py-2">{r.value ?? "—"}</td>
-                      <td className="px-3 py-2">{recordHolders[r.activity] ?? "—"}</td> {/* + */}
+                      <td className="px-3 py-2">{recordHolders[r.activity] ?? "—"}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+
+            <p className="text-xs text-neutral-500">
+              L’équipe détentrice est déterminée en comparant la valeur officielle du record
+              avec la dernière saisie ayant déclenché un bonus record sur cette activité.
+            </p>
           </section>
         </>
       )}

@@ -6,8 +6,8 @@ import { supabase } from "@/lib/supabase";
 
 /** ---------------- Config activités (comme tes règles) ---------------- */
 const TEAMS = [
-  "2nd A", "2nd B", "2nd C", "2nd D", "2nd E", "2nd F", "2nd G", "2nd H",
-  "2nd MEMN", "2nd MTNE A", "2nd MTNE B"
+  "2nd A 1", "2nd A 2", "2nd A 3", "2nd A 4", "2nd B 1", "2nd B 2", "2nd B 3", "2nd B 4", "2nd C 1", "2nd C 2", "2nd C 3", "2nd C 4", "2nd D 1", "2nd D 2", "2nd D 3", "2nd D 4", "2nd E 1", "2nd E 2", "2nd E 3", "2nd E 4", "2nd F 1", "2nd F 2", "2nd F 3", "2nd F 4", "2nd G 1", "2nd G 2", "2nd G 3", "2nd G 4", "2nd H 1", "2nd H 2", "2nd H 3", "2nd H 4", "2nd MTNE A 1", "2nd MTNE A 2", "2nd MTNE A 3", "2nd MTNE A 4", "2nd MTNE B 1", "2nd MTNE B 2", "2nd MTNE B 3", "2nd MTNE B 4", "2nd MEMN 1", "2nd MEMN 2", "2nd MEMN 3", "2nd MEMN 4"
+
 ];
 
 const ACTIVITIES_DUEL = [
